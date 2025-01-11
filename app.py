@@ -9,7 +9,7 @@ from datetime import datetime
 ### Setting up Flask app
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Pathak01@localhost:5432/Company'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://username:password@localhost:5432/Company'
 db = SQLAlchemy(app)
 app.app_context().push()
 
