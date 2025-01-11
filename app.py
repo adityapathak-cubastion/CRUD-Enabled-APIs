@@ -1,19 +1,19 @@
 ### Aditya Pathak | Technology used: PostgreSQL (PgAdmin4), Python (Flask-SQLAlchemy), Postman API
 
-# Importing Required Libraries
+### Importing Required Libraries
 
 from flask import Flask, render_template, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 
-# Setting up Flask app
+### Setting up Flask app
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Pathak01@localhost:5432/Company'
 db = SQLAlchemy(app)
 app.app_context().push()
 
-# Defining tables
+### Defining tables
 
 class Employee(db.Model):
     __tablename__ = 'Employee'
@@ -26,6 +26,10 @@ class Employee(db.Model):
     Salary = db.Column(db.Integer())
     Super_ssn = db.Column(db.Integer(), db.ForeignKey('Employee.Ssn'))
     Dno = db.Column(db.Integer(), db.ForeignKey('Department.Dnumber'))
+
+    department = db.relationship('Department', back_populates = 'employees', foreign_keys = [Dno])
+    projects = db.relationship('Project', secondary = 'Works_On', back_populates = 'employees')
+    supervisor = db.relationship('Employee', remote_side = [Ssn], foreign_keys = [Super_ssn])
 
     def __init__(self, Fname, Lname, Ssn, Bdate, Address, Sex, Salary, Super_ssn, Dno):
         self.Fname = Fname
@@ -44,6 +48,10 @@ class Department(db.Model):
     Dnumber = db.Column(db.Integer(), primary_key = True)
     Mgr_ssn = db.Column(db.Integer(), db.ForeignKey('Employee.Ssn'))
     Mgr_start_date = db.Column(db.Date())
+
+    employees = db.relationship('Employee', back_populates = 'department', foreign_keys = [Employee.Dno])
+    projects = db.relationship('Project', back_populates = 'department')
+    manager = db.relationship('Employee', foreign_keys = [Mgr_ssn])
 
     def __init__(self, Dname, Dnumber, Mgr_ssn, Mgr_start_date):
         self.Dname = Dname
@@ -66,6 +74,9 @@ class Project(db.Model):
     Pnumber = db.Column(db.Integer(), primary_key = True)
     Plocation = db.Column(db.String())
     Dnum = db.Column(db.Integer(), db.ForeignKey('Department.Dnumber'))
+
+    department = db.relationship('Department', back_populates = 'projects', foreign_keys = [Dnum])
+    employees = db.relationship('Employee', secondary = 'Works_On', back_populates = 'projects')
 
     def __init__(self, Pname, Pnumber, Plocation, Dnum):
         self.Pname = Pname
@@ -99,11 +110,107 @@ class Dependent(db.Model):
         self.Bdate = Bdate
         self.Relationship = Relationship
 
-# Code for backend - CRUD enabled APIs
+### Defining APIs
 
 @app.route('/')
 def index():
     return render_template('index.html')
+
+### For each department whose average employee salary is more than $30,000, retrieve the department name and the number of employees working for that department.
+
+@app.route('/high_dept_salary', methods = ['GET'])
+def high_dept_salary():
+    try:
+        res = db.session.query(Department.Dname, db.func.count(Employee.Ssn).label('num_employees')).join(Employee, Employee.Dno == Department.Dnumber).group_by(Department.Dname).having(db.func.avg(Employee.Salary) > 30000).all()
+        
+        highSalaryDepartments = [{
+            "Department Name" : result.Dname,
+            "Number of Employees" : result.num_employees
+            } for result in res]
+
+        return jsonify(highSalaryDepartments), 200
+    except Exception as e:
+        return jsonify({"Message" : "Error retrieving departments with salaries greater than $30,000.", "Error" : str(e)}), 500
+
+### A view that has the department name, its manager's name, number of employees working in that department, and the number of projects controlled by that department (for each department).
+
+@app.route('/dept_details', methods = ['GET'])
+def dept_details():
+    try:
+        employeeCount = db.session.query(Employee.Dno, db.func.count(Employee.Ssn).label('num_employees')).group_by(Employee.Dno).subquery()
+
+        res = db.session.query(Department.Dname, Employee.Fname.label('Manager_Fname'), Employee.Lname.label('Manager_Lname'), employeeCount.c.num_employees, db.func.count(Project.Pnumber).label('num_projects')).join(Employee, Department.Mgr_ssn == Employee.Ssn).outerjoin(Project, Project.Dnum == Department.Dnumber).outerjoin(employeeCount, Department.Dnumber == employeeCount.c.Dno).group_by(Department.Dname, Employee.Fname, Employee.Lname, employeeCount.c.num_employees).all()
+
+        view = [{
+            "Department Name": result.Dname,
+            "Manager Name": f"{result.Manager_Fname} {result.Manager_Lname}",
+            "Number of Employees": result.num_employees,
+            "Number of Projects": result.num_projects
+            } for result in res]
+        
+        return jsonify(view), 200
+    except Exception as e:
+        return jsonify({"Message": "Error retrieving department details.", "Error": str(e)}), 500
+
+### A view that has the project name, controlling department name, number of employees working on the project, and the total hours per week they work on the project (for each project).
+
+@app.route('/project_details', methods = ['GET'])
+def project_details():
+    try:
+        res = db.session.query(Project.Pname, Department.Dname, db.func.count(Employee.Ssn).label('num_employees'), db.func.coalesce(db.func.sum(Works_On.Hours), 0).label('total_hours')).join(Department, Project.Dnum == Department.Dnumber).outerjoin(Works_On, Works_On.Pno == Project.Pnumber).outerjoin(Employee, Works_On.Essn == Employee.Ssn).group_by(Project.Pname, Department.Dname).all()
+
+        view = [{
+            "Project Name": result.Pname,
+            "Controlling Department": result.Dname,
+            "Number of Employees": result.num_employees,
+            "Total Hours": result.total_hours
+        } for result in res]
+        
+        return jsonify(view), 200
+    except Exception as e:
+        return jsonify({"Message": "Error retrieving project details.", "Error": str(e)}), 500
+
+### A view that has the project name, controlling department name, number of employees, and total hours worked per week on the project for each project with more than one employee working on it.
+
+@app.route('/projects_multiple_employees', methods = ['GET'])
+def projects_multiple_employees():
+    try:
+        res = db.session.query(Project.Pname, Department.Dname, db.func.count(Employee.Ssn).label('num_employees'), db.func.sum(Works_On.Hours).label('total_hours')).join(Department, Project.Dnum == Department.Dnumber).outerjoin(Works_On, Works_On.Pno == Project.Pnumber).outerjoin(Employee, Works_On.Essn == Employee.Ssn).group_by(Project.Pname, Department.Dname).having(db.func.count(Employee.Ssn) > 1).all()
+
+        view = [{
+            "Project Name": result.Pname,
+            "Controlling Department": result.Dname,
+            "Number of Employees": result.num_employees,
+            "Total Hours": result.total_hours
+        } for result in res]
+        
+        return jsonify(view), 200
+    except Exception as e:
+        return jsonify({"Message": "Error retrieving projects with multiple employees.", "Error": str(e)}), 500
+
+### A view that has the employee name, employee salary, department that the employee works in, department manager name, manager salary, and average salary for the department.
+
+@app.route('/employee_manager_details', methods = ['GET'])
+def employee_manager_details():
+    try:
+        managerSubquery = db.session.query(Department.Dnumber.label('Dept_No'), Employee.Fname.label('Manager_Fname'), Employee.Lname.label('Manager_Lname'), Employee.Salary.label('Manager_Salary')).join(Employee, Department.Mgr_ssn == Employee.Ssn).subquery()
+
+        res = db.session.query(Employee.Fname.label('Employee_Fname'), Employee.Lname.label('Employee_Lname'), Employee.Salary.label('Employee_Salary'), Department.Dname, managerSubquery.c.Manager_Fname, managerSubquery.c.Manager_Lname, managerSubquery.c.Manager_Salary, db.func.avg(Employee.Salary).over(partition_by = Employee.Dno).label('Avg_Salary')).join(Department, Employee.Dno == Department.Dnumber).join(managerSubquery, Employee.Dno == managerSubquery.c.Dept_No).all()
+
+        view = [{
+            "Employee Name": f"{result.Employee_Fname} {result.Employee_Lname}",
+            "Employee Salary": result.Employee_Salary,
+            "Department": result.Dname,
+            "Manager Name": f"{result.Manager_Fname} {result.Manager_Lname}",
+            "Manager Salary": result.Manager_Salary,
+            "Average Salary": int(result.Avg_Salary)
+        } for result in res]
+        
+        return jsonify(view), 200
+    except Exception as e:
+        return jsonify({"Message": "Error retrieving employee and manager details.", "Error": str(e)}), 500
+
+### CRUD APIs for each table
 
 # For Employee table
 
